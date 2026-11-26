@@ -111,7 +111,7 @@ func TestDuplicateTreeTrustConfusion(t *testing.T) {
 		// per the next sub-test).
 		reencoded := reencodeViaGoGit(t, malformedRaw)
 
-		if _, err := gv.Verify(context.Background(), reencoded, resp.Signature, true); err == nil {
+		if _, err := gv.Verify(context.Background(), reencoded, resp.Signature, true, time.Now()); err == nil {
 			t.Fatalf("upstream regression: go-git re-encoded malformed bytes verified against the canonical signature")
 		}
 	})
@@ -125,7 +125,7 @@ func TestDuplicateTreeTrustConfusion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SplitCommit: %v", err)
 		}
-		if _, err := gv.Verify(context.Background(), c.Payload, c.Gpgsig, true); err == nil {
+		if _, err := gv.Verify(context.Background(), c.Payload, c.Gpgsig, true, time.Now()); err == nil {
 			t.Fatalf("expected signature verification to fail against malformed raw bytes, got nil error")
 		}
 	})
@@ -146,7 +146,7 @@ func TestDuplicateTreeTrustConfusion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SplitCommit: %v", err)
 		}
-		if _, err := gv.Verify(context.Background(), c.Payload, c.Gpgsig, true); err != nil {
+		if _, err := gv.Verify(context.Background(), c.Payload, c.Gpgsig, true, time.Now()); err != nil {
 			t.Errorf("signature verify over well-formed bytes: %v", err)
 		}
 	})

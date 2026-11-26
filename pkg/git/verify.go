@@ -21,8 +21,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/sigstore/gitsign/internal/sigstore/compat"
 	"github.com/sigstore/gitsign/pkg/rekor"
 	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	"github.com/sigstore/rekor/pkg/generated/models"
@@ -72,33 +74,102 @@ func NewClaim(c ClaimCondition, ok bool) Claim {
 func Verify(ctx context.Context, git Verifier, rekor rekor.Verifier, data, sig []byte, detached bool) (*VerificationSummary, error) {
 	claims := []Claim{}
 
-	cert, err := git.Verify(ctx, data, sig, detached)
+	// Parse the signature once so the signing time can be resolved before the
+	// chain check runs. The chain must be verified at the attested signing
+	// time (RFC3161 timestamp or Rekor integrated time), not at a time chosen
+	// from the certificate's own validity window.
+	sd, err := compat.ParseSignaturePEM(sig)
+	if err != nil {
+		return nil, err
+	}
+	certs, err := sd.GetCertificates()
+	if err != nil {
+		return nil, fmt.Errorf("error getting signature certs: %w", err)
+	}
+	if len(certs) == 0 {
+		return nil, errors.New("no certificates found in signature")
+	}
+	// Resolve the certificate the first SignerInfo actually authenticates
+	// with, rather than whatever sits at certs[0] (the cert bag order is not
+	// controlled by the signer). gitsign signatures carry a single signer.
+	raw := sd.Raw()
+	if len(raw.SignerInfos) == 0 {
+		return nil, errors.New("no signers found in signature")
+	}
+	cert, err := raw.SignerInfos[0].FindCertificate(certs)
+	if err != nil {
+		return nil, fmt.Errorf("finding signer certificate: %w", err)
+	}
+
+	hasTS, err := sd.HasTimestamps()
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		tlog       *models.LogEntryAnon
+		verifyTime time.Time
+	)
+	if hasTS {
+		// The RFC3161 timestamp is verified inside the CMS verifier and
+		// supplies the verification time itself. The Rekor entry still has to
+		// exist (inclusion is a separate guarantee), but its integrated time is
+		// not needed to pin the chain check - the two sources are
+		// substitutable.
+		verifyTime = time.Time{}
+	}
+
+	// Offline path first: signatures produced by current gitsign embed the
+	// Rekor entry in the CMS unsigned attributes. These entries always carry
+	// an integrated time, which is checked against the cert validity window
+	// before being used as the verification time.
+	if tlog, err = rekor.VerifyInclusion(ctx, sig, cert); err == nil {
+		if !hasTS {
+			t, terr := CheckIntegratedTime(cert, tlog)
+			if terr != nil {
+				return nil, terr
+			}
+			verifyTime = t
+		}
+	} else {
+		// Legacy rekor lookup: reconstruct the object hash that the legacy rekor
+		// entries were keyed on. We assume sig is the SHA-1-form signature (gpgsig
+		// for commits, in-body PEM for tags) — which matches how legacy rekor
+		// entries were generated. For new gpgsig-sha256 signatures there are no
+		// legacy entries to look up, so this reconstruction is best-effort.
+		commit, herr := ObjectHashFromSignature(data, sig)
+		if herr != nil {
+			return nil, herr
+		}
+		tlog, err = rekor.Verify(ctx, commit, cert)
+		if err != nil {
+			return nil, fmt.Errorf("failed to validate rekor entry: %w", err)
+		}
+		// Legacy "online" entries predate the embedded-entry format and may not
+		// carry an integrated time in every deployment. Grade them explicitly:
+		// an entry with an integrated time is checked against the cert window
+		// like the offline path; an entry without one cannot pin a time and is
+		// downgraded to a current-time chain check rather than silently using a
+		// time from the cert's own window. The inclusion proof above still
+		// attests the entry.
+		if !hasTS {
+			t, terr := CheckIntegratedTime(cert, tlog)
+			switch {
+			case terr == nil:
+				verifyTime = t
+			case errors.Is(terr, ErrNoIntegratedTime):
+				verifyTime = time.Now()
+			default:
+				return nil, terr
+			}
+		}
+	}
+
+	cert, err = git.Verify(ctx, data, sig, detached, verifyTime)
 	if err != nil {
 		return nil, err
 	}
 	claims = append(claims, NewClaim(ClaimValidatedSignature, true))
-
-	if tlog, err := rekor.VerifyInclusion(ctx, sig, cert); err == nil {
-		return &VerificationSummary{
-			Cert:     cert,
-			LogEntry: tlog,
-			Claims:   claims,
-		}, nil
-	}
-
-	// Legacy rekor lookup: reconstruct the object hash that the legacy rekor
-	// entries were keyed on. We assume sig is the SHA-1-form signature (gpgsig
-	// for commits, in-body PEM for tags) — which matches how legacy rekor
-	// entries were generated. For new gpgsig-sha256 signatures there are no
-	// legacy entries to look up, so this reconstruction is best-effort.
-	commit, err := ObjectHashFromSignature(data, sig)
-	if err != nil {
-		return nil, err
-	}
-	tlog, err := rekor.Verify(ctx, commit, cert)
-	if err != nil {
-		return nil, fmt.Errorf("failed to validate rekor entry: %w", err)
-	}
 	claims = append(claims, NewClaim(ClaimValidatedRekorEntry, true))
 
 	return &VerificationSummary{
@@ -123,7 +194,10 @@ func VerifySignature(data, sig []byte, detached bool, rootCerts, intermediates *
 		return nil, err
 	}
 
-	return v.Verify(context.Background(), data, sig, detached)
+	// This convenience wrapper has no Rekor client and no way to source an
+	// attested signing time, so it verifies at the current time. Full
+	// verification (integrated-time / timestamp based) goes through Verify.
+	return v.Verify(context.Background(), data, sig, detached, time.Now())
 }
 
 // ObjectHashFromSignature reconstructs the git-core object hash from the object

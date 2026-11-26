@@ -24,7 +24,7 @@ func TestAddSignerInfoWithSignature(t *testing.T) {
 	cert, signer := selfSignedCert(t)
 	roots := x509.NewCertPool()
 	roots.AddCert(cert)
-	opts := x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning}}
+	opts := x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning}, CurrentTime: time.Now()}
 
 	body := []byte("hello world")
 

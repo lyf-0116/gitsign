@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/github/smimesign/ietf-cms/protocol"
 	"golang.org/x/xerrors"
@@ -56,6 +57,15 @@ func verifyOptionsForSignedData(sd *SignedData) (opts x509.VerifyOptions) {
 	opts.KeyUsages = []x509.ExtKeyUsage{x509.ExtKeyUsageAny}
 
 	return
+}
+
+// optsWithCurrentTime returns opts with CurrentTime pinned to now, for
+// signatures whose SignerInfo carries no RFC3161 timestamp. The verifier no
+// longer derives a time from the cert's own NotBefore, so tests must supply
+// one explicitly (the production caller pins the Rekor integrated time).
+func optsWithCurrentTime(opts x509.VerifyOptions) x509.VerifyOptions {
+	opts.CurrentTime = time.Now()
+	return opts
 }
 
 func TestVerify(t *testing.T) {
@@ -141,7 +151,7 @@ func TestVerifyChain(t *testing.T) {
 	sd, _ := ParseSignedData(ber)
 
 	// good root
-	chains, err := sd.Verify(rootOpts, x509.VerifyOptions{})
+	chains, err := sd.Verify(optsWithCurrentTime(rootOpts), x509.VerifyOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,14 +167,14 @@ func TestVerifyChain(t *testing.T) {
 	}
 
 	// bad root
-	if _, err = sd.Verify(otherRootOpts, otherRootOpts); err != nil {
+	if _, err = sd.Verify(optsWithCurrentTime(otherRootOpts), optsWithCurrentTime(otherRootOpts)); err != nil {
 		if _, isX509Err := err.(x509.UnknownAuthorityError); !isX509Err {
 			t.Fatalf("expected x509.UnknownAuthorityError, got %v", err)
 		}
 	}
 
 	// system root
-	if _, err = sd.Verify(x509.VerifyOptions{}, x509.VerifyOptions{}); err != nil {
+	if _, err = sd.Verify(optsWithCurrentTime(x509.VerifyOptions{}), optsWithCurrentTime(x509.VerifyOptions{})); err != nil {
 		// Need to check error string due to a regression in Go 1.18
 		// See https://github.com/golang/go/issues/52010
 		if _, isX509Err := err.(x509.UnknownAuthorityError); !isX509Err && !strings.Contains(err.Error(), "certificate is not trusted") {
@@ -173,7 +183,7 @@ func TestVerifyChain(t *testing.T) {
 	}
 
 	// no root
-	if _, err = sd.Verify(x509.VerifyOptions{Roots: x509.NewCertPool()}, x509.VerifyOptions{}); err != nil {
+	if _, err = sd.Verify(optsWithCurrentTime(x509.VerifyOptions{Roots: x509.NewCertPool()}), x509.VerifyOptions{}); err != nil {
 		if _, isX509Err := err.(x509.UnknownAuthorityError); !isX509Err {
 			t.Fatalf("expected x509.UnknownAuthorityError, got %v", err)
 		}

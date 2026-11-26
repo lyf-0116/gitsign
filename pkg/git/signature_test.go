@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -103,7 +104,7 @@ func TestSignVerify(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := cv.Verify(ctx, data, resp.Signature, detached); err != nil {
+				if _, err := cv.Verify(ctx, data, resp.Signature, detached, time.Now()); err != nil {
 					t.Fatalf("Verify() = %v", err)
 				}
 			})
@@ -170,7 +171,7 @@ func TestVerifyReturnsSignerCert(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := cv.Verify(ctx, data, der, detached)
+			got, err := cv.Verify(ctx, data, der, detached, time.Now())
 			if err != nil {
 				t.Fatalf("Verify() = %v", err)
 			}
@@ -185,24 +186,19 @@ func TestVerifyReturnsSignerCert(t *testing.T) {
 	}
 }
 
-// TestVerifyMultiSignerDifferentWindows ensures Verify succeeds for a PKCS7
-// containing multiple SignerInfos whose certs have non-overlapping validity
-// windows. With a single shared CurrentTime, one of the chain verifications
-// would always fail; the internal verifier must derive a per-cert time so
-// that each SignerInfo is checked against a time within its own window.
-func TestVerifyMultiSignerDifferentWindows(t *testing.T) {
+// TestVerifyCertValidityWindow ensures the verifier checks the certificate
+// against the externally supplied verification time rather than fabricating
+// a time from the cert's own NotBefore. The old per-cert NotBefore + 1min
+// fallback made the validity window vacuously valid, so a signature made
+// after the cert expired still verified.
+func TestVerifyCertValidityWindow(t *testing.T) {
 	ctx := context.Background()
 	ca := fakeca.New(fakeca.IsCA)
 
-	// Issue two signers with deliberately non-overlapping validity windows.
 	now := time.Now()
-	oldSigner := ca.Issue(
+	signer := ca.Issue(
 		fakeca.NotBefore(now.Add(-48*time.Hour)),
 		fakeca.NotAfter(now.Add(-24*time.Hour)),
-	)
-	newSigner := ca.Issue(
-		fakeca.NotBefore(now.Add(24*time.Hour)),
-		fakeca.NotAfter(now.Add(48*time.Hour)),
 	)
 	roots := x509.NewCertPool()
 	roots.AddCert(ca.Certificate)
@@ -212,11 +208,8 @@ func TestVerifyMultiSignerDifferentWindows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSignedData() = %v", err)
 	}
-	if err := sd.Sign([]*x509.Certificate{oldSigner.Certificate}, oldSigner.PrivateKey); err != nil {
-		t.Fatalf("Sign() old = %v", err)
-	}
-	if err := sd.Sign([]*x509.Certificate{newSigner.Certificate}, newSigner.PrivateKey); err != nil {
-		t.Fatalf("Sign() new = %v", err)
+	if err := sd.Sign([]*x509.Certificate{signer.Certificate}, signer.PrivateKey); err != nil {
+		t.Fatalf("Sign() = %v", err)
 	}
 	der, err := sd.ToDER()
 	if err != nil {
@@ -227,8 +220,27 @@ func TestVerifyMultiSignerDifferentWindows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cv.Verify(ctx, data, der, false); err != nil {
-		t.Fatalf("Verify() = %v; want success despite non-overlapping cert windows", err)
+
+	// A time inside the cert window (the attested signing time in production)
+	// verifies.
+	if _, err := cv.Verify(ctx, data, der, false, now.Add(-36*time.Hour)); err != nil {
+		t.Fatalf("Verify inside validity window = %v; want success", err)
+	}
+
+	// A time after NotAfter must fail instead of being silently moved into
+	// the cert's own window.
+	_, err = cv.Verify(ctx, data, der, false, now)
+	if err == nil {
+		t.Fatal("Verify after NotAfter = nil error; want expired error")
+	}
+	if !strings.Contains(err.Error(), "expired") && !strings.Contains(err.Error(), "not yet valid") {
+		t.Fatalf("Verify error = %v; want a validity-window error", err)
+	}
+
+	// With no supplied time and no RFC3161 timestamp, verification must fail
+	// explicitly rather than defaulting to a time inside a cert's own window.
+	if _, err := cv.Verify(ctx, data, der, false, time.Time{}); !errors.Is(err, cms.ErrNoVerificationTime) {
+		t.Fatalf("Verify with zero time = %v; want cms.ErrNoVerificationTime", err)
 	}
 }
 
@@ -263,7 +275,7 @@ func TestVerifyNoCerts(t *testing.T) {
 
 	for _, detached := range []bool{true, false} {
 		t.Run(fmt.Sprintf("detached(%t)", detached), func(t *testing.T) {
-			cert, err := cv.Verify(ctx, data, der, detached)
+			cert, err := cv.Verify(ctx, data, der, detached, time.Now())
 			if err == nil {
 				t.Fatalf("Verify() expected error, got cert %v", cert)
 			}

@@ -28,7 +28,7 @@ func TestSign(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err = sd2.Verify(rootOpts, x509.VerifyOptions{}); err != nil {
+	if _, err = sd2.Verify(optsWithCurrentTime(rootOpts), x509.VerifyOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -55,7 +55,7 @@ func TestSign(t *testing.T) {
 	// check that we're including signing time attribute
 	st, err := sd2.psd.SignerInfos[0].GetSigningTimeAttribute()
 	delta := 5 * time.Second
-	if st.After(time.Now().Add(delta)) || st.Before(time.Now().Add(-1 * delta)) {
+	if st.After(time.Now().Add(delta)) || st.Before(time.Now().Add(-1*delta)) {
 		t.Fatal("expected SigningTime to be now. Difference was", st.Sub(time.Now()))
 	}
 }
@@ -73,7 +73,7 @@ func TestSignDetached(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err = sd2.VerifyDetached(data, rootOpts, x509.VerifyOptions{}); err != nil {
+	if _, err = sd2.VerifyDetached(data, optsWithCurrentTime(rootOpts), x509.VerifyOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -100,7 +100,7 @@ func TestSignDetached(t *testing.T) {
 	// check that we're including signing time attribute
 	st, err := sd2.psd.SignerInfos[0].GetSigningTimeAttribute()
 	delta := 5 * time.Second
-	if st.After(time.Now().Add(delta)) || st.Before(time.Now().Add(-1 * delta)) {
+	if st.After(time.Now().Add(delta)) || st.Before(time.Now().Add(-1*delta)) {
 		t.Fatal("expected SigningTime to be now. Difference was", st.Sub(time.Now()))
 	}
 }
@@ -217,7 +217,7 @@ func TestSignRemoveHeaders(t *testing.T) {
 		Intermediates: leaf.ChainPool(),
 	}
 
-	if _, err := sd.Verify(opts, x509.VerifyOptions{}); err != nil {
+	if _, err := sd.Verify(optsWithCurrentTime(opts), x509.VerifyOptions{}); err != nil {
 		t.Fatal(err)
 	}
 }

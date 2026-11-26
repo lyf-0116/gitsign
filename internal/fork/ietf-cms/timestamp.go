@@ -97,8 +97,13 @@ func getTimestamp(si protocol.SignerInfo, opts x509.VerifyOptions) (timestamp.In
 		return timestamp.Info{}, protocol.ErrUnsupported
 	}
 
-	// verify timestamp signature and certificate chain..
-	if _, err = tst.Verify(opts, opts); err != nil {
+	// Verify the timestamp signature and its certificate chain. The TST's
+	// own signing time is the TSTInfo GenTime (the moment the TSA asserts it
+	// produced the token), so the TSA certificate's validity window is
+	// checked against that rather than requiring an outer time source.
+	tstOpts := opts
+	tstOpts.CurrentTime = tsti.GenTime
+	if _, err = tst.Verify(tstOpts, tstOpts); err != nil {
 		return timestamp.Info{}, err // nolint:staticcheck
 	}
 
@@ -126,4 +131,22 @@ func hasTimestamp(si protocol.SignerInfo) (bool, error) {
 	}
 
 	return len(vals) > 0, nil
+}
+
+// HasTimestamps reports whether any SignerInfo in the SignedData carries an
+// RFC3161 timestamp token in its unsigned attributes. Callers use it to tell
+// whether the verifier can derive signing time from a timestamp itself or
+// whether they must pin a verification time (e.g. from a Rekor integrated
+// time) via x509.VerifyOptions.CurrentTime.
+func (sd *SignedData) HasTimestamps() (bool, error) {
+	for _, si := range sd.psd.SignerInfos {
+		has, err := hasTimestamp(si)
+		if err != nil {
+			return false, err
+		}
+		if has {
+			return true, nil
+		}
+	}
+	return false, nil
 }

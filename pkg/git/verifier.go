@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"time"
 
 	"github.com/sigstore/gitsign/internal/fulcio/fulcioroots"
 	"github.com/sigstore/gitsign/internal/sigstore/compat"
@@ -27,7 +28,7 @@ import (
 
 // Verifier verifies git commit signature data.
 type Verifier interface {
-	Verify(ctx context.Context, data, sig []byte, detached bool) (*x509.Certificate, error)
+	Verify(ctx context.Context, data, sig []byte, detached bool, verifyTime time.Time) (*x509.Certificate, error)
 }
 
 // CertVerifier is the default implementation of Verifier.
@@ -90,7 +91,14 @@ func WithTimestampCertPool(pool *x509.CertPool) CertVerifierOption {
 // work.
 //
 // Signatures should be CMS/PKCS7 formatted.
-func (v *CertVerifier) Verify(_ context.Context, data, sig []byte, detached bool) (*x509.Certificate, error) {
+//
+// verifyTime pins the certificate validity-window check to an independently
+// sourced signing time (a Rekor entry's integrated time, or zero when the
+// signature carries a verified RFC3161 timestamp, which the internal CMS
+// verifier uses itself). Passing zero for a signature without a timestamp is
+// an error: the verifier no longer invents a time inside the cert's own
+// window.
+func (v *CertVerifier) Verify(_ context.Context, data, sig []byte, detached bool, verifyTime time.Time) (*x509.Certificate, error) {
 	// Parse signature (PEM-armored or raw DER).
 	sd, err := compat.ParseSignaturePEM(sig)
 	if err != nil {
@@ -110,11 +118,13 @@ func (v *CertVerifier) Verify(_ context.Context, data, sig []byte, detached bool
 		Roots:         v.roots,
 		Intermediates: v.intermediates,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
-		// Leave CurrentTime zero. The internal CMS verifier picks a per-cert
-		// time inside its SignerInfos loop (timestamp if present, else the
-		// cert's own NotBefore + 1min), so each SignerInfo is checked against
-		// a time that lies within its own validity window. Actual signing
-		// time is verified independently via Rekor.
+		// Pin the chain check to the attested signing time. When the
+		// signature carries an RFC3161 timestamp the internal CMS verifier
+		// verifies the token and overrides this with its GenTime; otherwise
+		// the caller must pass the Rekor integrated time. A zero value with
+		// no timestamp fails explicitly instead of defaulting to a time
+		// inside the cert's own validity window.
+		CurrentTime: verifyTime,
 	}
 
 	tsaOpts := x509.VerifyOptions{

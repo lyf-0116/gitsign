@@ -24,6 +24,7 @@ import (
 
 	"github.com/sigstore/gitsign/internal/fulcio/fulcioroots"
 	"github.com/sigstore/gitsign/internal/git/gittest"
+	"github.com/sigstore/gitsign/internal/sigstore/compat"
 	"github.com/sigstore/gitsign/pkg/git"
 	"github.com/sigstore/gitsign/pkg/rekor"
 	"github.com/sigstore/sigstore/pkg/tuf"
@@ -53,12 +54,36 @@ func TestVerifyOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cert, err := verifier.Verify(ctx, body, sig, true)
+	// Resolve the signing certificate from the signature before looking up
+	// its Rekor entry.
+	sd, err := compat.ParseSignaturePEM(sig)
 	if err != nil {
 		t.Fatal(err)
 	}
+	sdCerts, err := sd.GetCertificates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := sd.Raw()
+	if len(raw.SignerInfos) == 0 {
+		t.Fatal("no signers found in signature")
+	}
+	cert, err := raw.SignerInfos[0].FindCertificate(sdCerts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	tlog, err := client.VerifyInclusion(ctx, sig, cert)
 	if err != nil {
+		t.Fatal(err)
+	}
+	// Pin the chain check to the entry's attested inclusion time and assert
+	// it lies within the signing certificate's validity window.
+	verifyTime, err := git.CheckIntegratedTime(cert, tlog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifier.Verify(ctx, body, sig, true, verifyTime); err != nil {
 		t.Fatal(err)
 	}
 	t.Log(*tlog.LogIndex)

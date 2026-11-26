@@ -32,6 +32,7 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
+	"github.com/go-openapi/swag/conv"
 	"github.com/google/go-cmp/cmp"
 	"github.com/sigstore/cosign/v3/pkg/cosign"
 	certverifier "github.com/sigstore/gitsign/internal/cert"
@@ -164,7 +165,12 @@ func (fakeRekor) Search(_ context.Context, _ string, _ *x509.Certificate) (*mode
 }
 
 func (fakeRekor) VerifyInclusion(_ context.Context, _ []byte, _ *x509.Certificate) (*models.LogEntryAnon, error) {
-	return nil, nil
+	// The legacy verifier pins the certificate chain check to the entry's
+	// integrated time, so the mock entry has to carry one inside the test
+	// cert's validity window.
+	return &models.LogEntryAnon{
+		IntegratedTime: conv.Pointer(time.Now().Unix()),
+	}, nil
 }
 
 type identity struct {

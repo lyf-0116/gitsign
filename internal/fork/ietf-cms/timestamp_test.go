@@ -3,6 +3,7 @@ package cms
 import (
 	"crypto/rsa"
 	"crypto/x509"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -193,5 +194,42 @@ func TestTimestampsVerifications(t *testing.T) {
 	sd = getTimestampedSignedData()
 	if _, err := getTimestamp(sd.psd.SignerInfos[0], intermediateOpts); err != rsa.ErrVerification {
 		t.Fatalf("expected %v, got %v", rsa.ErrVerification, err)
+	}
+}
+
+// TestVerificationTimeSubstitutability pins the contract between the two
+// trusted signing-time sources: without an RFC3161 timestamp the caller must
+// supply a verification time itself (the verifier must not invent one from
+// the cert's NotBefore); with a verified timestamp the token's GenTime is
+// used even when the caller supplies no time.
+func TestVerificationTimeSubstitutability(t *testing.T) {
+	// No timestamp, no caller time: explicit failure instead of default pass.
+	plain, _ := NewSignedData([]byte("hi"))
+	if err := plain.Sign(leaf.Chain(), leaf.PrivateKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Verify(intermediateOpts, intermediateOpts); !errors.Is(err, ErrNoVerificationTime) {
+		t.Fatalf("plain Verify() = %v; want ErrNoVerificationTime", err)
+	}
+
+	// No timestamp, but the caller pins a time inside the cert window: passes.
+	opts := intermediateOpts
+	opts.CurrentTime = time.Now()
+	if _, err := plain.Verify(opts, intermediateOpts); err != nil {
+		t.Fatalf("Verify with caller-pinned time = %v; want success", err)
+	}
+
+	// Verified timestamp supplies the time itself (no caller time needed).
+	tsa.Clear()
+	timestamped, _ := NewSignedData([]byte("hi"))
+	if err := timestamped.Sign(leaf.Chain(), leaf.PrivateKey); err != nil {
+		t.Fatal(err)
+	}
+	tsReq, _ := tsRequest(timestamped.psd.SignerInfos[0])
+	tsResp, _ := tsa.Do(tsReq)
+	tsAttr, _ := protocol.NewAttribute(oid.AttributeTimeStampToken, tsResp.TimeStampToken)
+	timestamped.psd.SignerInfos[0].UnsignedAttrs = append(timestamped.psd.SignerInfos[0].UnsignedAttrs, tsAttr)
+	if _, err := timestamped.Verify(intermediateOpts, intermediateOpts); err != nil {
+		t.Fatalf("timestamped Verify() = %v; want success from the token's GenTime", err)
 	}
 }

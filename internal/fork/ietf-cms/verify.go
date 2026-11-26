@@ -5,11 +5,18 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"errors"
-	"time"
 
 	"github.com/github/smimesign/ietf-cms/protocol"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 )
+
+// ErrNoVerificationTime is returned when no trusted signing time could be
+// established for a SignerInfo, so the certificate's validity window cannot
+// be checked against an independently sourced time. Callers that can supply
+// one (e.g. a Rekor entry's integrated time) must set
+// x509.VerifyOptions.CurrentTime (or embed an RFC3161 timestamp) instead of
+// relying on the verifier to pick a time inside the cert's own window.
+var ErrNoVerificationTime = errors.New("no trusted verification time available: set VerifyOptions.CurrentTime (e.g. from the Rekor integrated time) or embed an RFC3161 timestamp")
 
 // Verify verifies the SingerInfos' signatures. Each signature's associated
 // certificate is verified using the provided roots. UnsafeNoVerify may be
@@ -149,12 +156,10 @@ func (sd *SignedData) verify(econtent []byte, opts x509.VerifyOptions, tsOpts x5
 			return nil, err
 		}
 
-		// If the caller didn't specify the signature time, we'll use the verified
-		// timestamp. If there's no timestamp we use the current time when checking
-		// the cert validity window. This isn't perfect because the signature may
-		// have been created before the cert's not-before date, but this is the best
-		// we can do. We update a copy of opts because we are verifying multiple
-		// signatures in a loop and only want the timestamp to affect this one.
+		// If the caller didn't specify the signature time, use the verified
+		// RFC3161 timestamp as the verification time. We update a copy of opts
+		// because we verify multiple signatures in a loop and only want the
+		// timestamp to affect this one.
 		optsCopy := opts
 
 		if hasTS, err := hasTimestamp(si); err != nil {
@@ -181,14 +186,13 @@ func (sd *SignedData) verify(econtent []byte, opts x509.VerifyOptions, tsOpts x5
 			}
 		}
 
-		// If neither the caller nor a timestamp pinned a verification time,
-		// fall back to this signer cert's NotBefore so the validity-window
-		// check passes. The caller is expected to verify the actual signing
-		// time independently (e.g. via Rekor). This is done per-cert so that
-		// multiple SignerInfos with different validity windows each get a
-		// time that lies within their own window.
+		// Without a caller-provided time or verified RFC3161 timestamp there is
+		// no independent evidence of when the signature was made. Picking a time
+		// inside the cert's own validity window would make the validity check
+		// vacuous, so fail explicitly and let the caller supply a trusted time
+		// (gitsign uses the Rekor entry's integrated time; see pkg/git).
 		if optsCopy.CurrentTime.IsZero() {
-			optsCopy.CurrentTime = cert.NotBefore.Add(1 * time.Minute)
+			return nil, ErrNoVerificationTime
 		}
 
 		if chain, err := cert.Verify(optsCopy); err != nil {
