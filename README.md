@@ -79,6 +79,8 @@ The following config options are supported:
 | clientID           | sigstore                         | OIDC client ID for application                                                                                                                                                                                                                                                   |
 | issuer             | https://oauth2.sigstore.dev/auth | OIDC provider to be used to issue ID token                                                                                                                                                                                                                                       |
 | matchCommitter     | false                            | If true, verify that the committer matches certificate user identity. See [docs/committer-verification.md](./docs/committer-verification.md) for more details.                                                                                                                   |
+| trustedIdentities  |                                  | Comma-separated list of trusted signer identities used by `gitsign verify` / `gitsign verify-tag` when no `--certificate-identity` flag is given. Each entry is an `identity issuer` pair, e.g. `alice@example.com https://oauth2.sigstore.dev/auth`. See [docs/verification.md](./docs/verification.md) for details.                                  |
+| trustedIdentitiesFile |                               | Path to a trusted-identities allowlist (local file, `http(s)://` URL, or a path relative to the `origin` remote that is resolved to `<origin>/raw/<path>`). One `identity issuer` pair per line; blank lines and `#` comments are ignored.                                                                                                       |
 | redirectURL        |                                  | OIDC Redirect URL                                                                                                                                                                                                                                                                |
 | rekor              | https://rekor.sigstore.dev       | Address of Rekor server                                                                                                                                                                                                                                                          |
 | connectorID        |                                  | Optional Connector ID to auto-select to pre-select auth flow to use. For the public sigstore instance, valid values are:<br>- `https://github.com/login/oauth`<br>- `https://accounts.google.com`<br>- `https://login.microsoftonline.com`                                       |
@@ -115,6 +117,8 @@ The following config options are supported:
 | GITSIGN_ENABLE_SIGSTORE_GO   | ❌                 | true                             | If true (the default), use the sigstore-go libraries for signing and verification via the CMS↔bundle compatibility layer, for both online and offline Rekor modes. Set to `false` to fall back to the legacy CMS + Rekor path. The on-disk signature format is unchanged. See [docs/bundle-cms.md](./docs/bundle-cms.md) for more details. |
 | GITSIGN_REKOR_VERSION        | ✅                 | 1                                | (Experimental) Rekor API version to upload signatures to. One of [1, 2] (default: 1).<br>1 - the legacy Rekor v1 REST API.<br>2 - the Rekor v2 / [rekor-tiles](https://github.com/sigstore/rekor-tiles) API. Can only be set when the sigstore-go signing path is enabled (`GITSIGN_ENABLE_SIGSTORE_GO=true`, the default). |
 | GITSIGN_URL_OPENER           | ❌                 |                                  | Optional command used to open the OIDC login URL during the interactive auth flow. If unset, the platform default browser is used. The command is split using shell-style word splitting (quote arguments containing spaces) and each token is rendered as a Go text/template with the login URL available as `{{.URL}}` (e.g. `firefox --new-tab {{.URL}}`). No shell is invoked, so shell metacharacters are inert. See [docs/url-opener.md](./docs/url-opener.md) for examples, including opening a specific Chrome profile. |
+| GITSIGN_TRUSTED_IDENTITIES      | ❌              |                                  | Comma-separated trusted `identity issuer` pairs used by `gitsign verify` / `gitsign verify-tag` when no `--certificate-identity` flag is passed. See [docs/verification.md](./docs/verification.md). |
+| GITSIGN_TRUSTED_IDENTITIES_FILE | ❌              |                                  | Local path, `http(s)://` / `file://` URL, or `origin`-relative path to a trusted-identities allowlist file (one `identity issuer` pair per line). |
 
 For environment variables that support `Sigstore Prefix`, the values may be
 provided with either a `GITSIGN_` or `SIGSTORE_` prefix - e.g.
@@ -166,7 +170,7 @@ Commits can be verified using `gitsign verify`:
 $ gitsign verify --certificate-identity=billy@chainguard.dev --certificate-oidc-issuer=https://accounts.google.com HEAD
 tlog index: 16072348
 gitsign: Signature made using certificate ID 0xa6c178d9292f70eb5c4ad9e274ead0158e75e484 | CN=sigstore-intermediate,O=sigstore.dev
-gitsign: Good signature from [billy@chainguard.dev](https://accounts.google.com)
+gitsign: Good signature from [billy@chainguard.dev](https://accounts.google.com); identity source: command-line/config flags
 Validated Git signature: true
 Validated Rekor entry: true
 Validated Certificate claims: true
@@ -174,6 +178,27 @@ Validated Certificate claims: true
 
 `HEAD` may be replaced with any
 [Git revision](https://git-scm.com/docs/gitrevisions) (e.g. branch, tag, etc.).
+
+The expected identity is **never** taken from the commit's committer email: the
+committer field is plain text inside the commit and can be set to any value, so
+checking the certificate against it only proves the certificate repeats the
+commit's self-reported identity. Instead, `gitsign verify` requires an identity
+from a trusted source:
+
+1. Explicit flags: `--certificate-identity` together with
+   `--certificate-oidc-issuer` (or their `*-regexp` variants). Identity and
+   issuer are always validated as a pair - supplying only one is an error.
+2. A repository allowlist: configure `gitsign.trustedIdentities` (inline) or
+   `gitsign.trustedIdentitiesFile` (a local file, an `http(s)://` URL, or a
+   path relative to the `origin` remote). Each entry is an
+   `identity issuer` pair. When the signer certificate's SAN and issuer match
+   an entry, verification succeeds and the output marks
+   `identity source: repository trusted identities allowlist`.
+
+If neither is available, verification fails rather than falling back to the
+committer email. This keeps one-command `gitsign verify HEAD` working for
+repositories that ship an allowlist, while an attacker cannot pass by obtaining
+their own valid Fulcio certificate for the victim's email address.
 
 **NOTE**: `gitsign verify` is preferred over
 [`git verify-commit`](https://git-scm.com/docs/git-verify-commit) and
@@ -188,7 +213,7 @@ Using these commands will still work, but a warning being displayed.
 $ git verify-commit HEAD
 tlog index: 16072349
 gitsign: Signature made using certificate ID 0xa6c178d9292f70eb5c4ad9e274ead0158e75e484 | CN=sigstore-intermediate,O=sigstore.dev
-gitsign: Good signature from [billy@chainguard.dev](https://accounts.google.com)
+gitsign: Signature certificate subject [billy@chainguard.dev](https://accounts.google.com); no trusted identity policy applied
 Validated Git signature: true
 Validated Rekor entry: true
 Validated Certificate claims: false

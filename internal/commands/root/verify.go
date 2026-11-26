@@ -82,7 +82,7 @@ func commandVerify(o *options, s *gsio.Streams, args ...string) error {
 		return fmt.Errorf("failed to verify signature: %w", err)
 	}
 
-	verify.PrintSummary(s.Err, summary)
+	verify.PrintSummary(s.Err, summary, verify.IdentitySourceNone)
 	fmt.Fprintln(s.Err, "WARNING: git verify-commit does not verify cert claims. Prefer using `gitsign verify` instead.") // nolint:errcheck
 
 	gpgout.EmitGoodSig(summary.Cert)

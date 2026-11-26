@@ -297,3 +297,48 @@ func TestRekorVersionEnv(t *testing.T) {
 		}
 	})
 }
+
+func TestParseTrustedIdentity(t *testing.T) {
+	got := parseTrustedIdentity("alice@example.com https://oauth2.sigstore.dev/auth,broken,https://w https://i")
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2 (malformed entry dropped): %+v", len(got), got)
+	}
+	if got[0].Identity != "alice@example.com" || got[0].Issuer != "https://oauth2.sigstore.dev/auth" {
+		t.Errorf("first entry = %+v", got[0])
+	}
+	if got[1].Identity != "https://w" || got[1].Issuer != "https://i" {
+		t.Errorf("second entry = %+v", got[1])
+	}
+}
+
+func TestTrustedIdentitiesConfig(t *testing.T) {
+	t.Cleanup(func() { execFn = realExec })
+	execFn = func() (io.Reader, error) {
+		return strings.NewReader(strings.Join([]string{
+			"gitsign.trustedidentities alice@example.com https://oauth2.sigstore.dev/auth",
+			"gitsign.trustedidentitiesfile .gitsign/trusted-identities",
+		}, "\n")), nil
+	}
+
+	got, err := Get()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.TrustedIdentities) != 1 || got.TrustedIdentities[0].Identity != "alice@example.com" {
+		t.Errorf("TrustedIdentities = %+v", got.TrustedIdentities)
+	}
+	if got.TrustedIdentitiesFile != ".gitsign/trusted-identities" {
+		t.Errorf("TrustedIdentitiesFile = %q", got.TrustedIdentitiesFile)
+	}
+
+	t.Run("env overrides file location", func(t *testing.T) {
+		t.Setenv("GITSIGN_TRUSTED_IDENTITIES_FILE", "/etc/gitsign/allowlist")
+		got, err := Get()
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.TrustedIdentitiesFile != "/etc/gitsign/allowlist" {
+			t.Errorf("TrustedIdentitiesFile = %q", got.TrustedIdentitiesFile)
+		}
+	})
+}

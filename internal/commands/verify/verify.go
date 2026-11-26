@@ -97,7 +97,27 @@ func (o *options) Run(_ io.Writer, args []string) error {
 		return fmt.Errorf("%w: %q", git.ErrUnsupportedSignatureType, p.Type)
 	}
 
-	defaultCertIdentity(&o.CertVerifyOptions, repo, *h)
+	// Extract the signer certificate up front so the identity policy can be
+	// decided before any verification runs. The cert is part of the CMS
+	// signature; the signature itself is still fully validated below.
+	leaf, err := LeafCertificate(sig)
+	if err != nil {
+		return fmt.Errorf("error reading signer certificate: %w", err)
+	}
+	leafExt := cosign.CertExtensions{Cert: leaf}
+
+	// Decide which identity the certificate is allowed to carry before
+	// verifying. The expected identity comes only from explicit flags or from
+	// the repository's trusted allowlist - never from the commit's committer
+	// field, which is attacker-controlled text.
+	source, err := ResolveCertIdentity(
+		ctx, o.Config, &o.CertVerifyOptions, repo,
+		cryptoutils.GetSubjectAlternateNames(leaf),
+		leafExt.GetIssuer(),
+	)
+	if err != nil {
+		return err
+	}
 
 	v, err := gitsign.NewVerifierWithCosignOpts(ctx, o.Config, &o.CertVerifyOptions)
 	if err != nil {
@@ -108,38 +128,29 @@ func (o *options) Run(_ io.Writer, args []string) error {
 		return err
 	}
 
-	PrintSummary(os.Stdout, summary)
+	PrintSummary(os.Stdout, summary, source)
 
 	return nil
 }
 
-// defaultCertIdentity fills opts.CertIdentity with h's committer email when
-// the caller didn't specify an identity to verify against (neither
-// --certificate-identity nor --certificate-identity-regexp). This mirrors
-// the identity Fulcio embeds for interactive keyless signing, so verifying a
-// commit against its own committer no longer requires spelling out
-// --certificate-identity by hand. An explicit --certificate-identity or
-// --certificate-identity-regexp is left untouched.
-// See https://github.com/sigstore/gitsign/issues/293.
-func defaultCertIdentity(opts *cosignopts.CertVerifyOptions, repo *gogit.Repository, h plumbing.Hash) {
-	if opts.CertIdentity != "" || opts.CertIdentityRegexp != "" {
-		return
-	}
-	commitObj, err := repo.CommitObject(h)
-	if err != nil || commitObj.Committer.Email == "" {
-		return
-	}
-	opts.CertIdentity = commitObj.Committer.Email
-}
-
-func PrintSummary(w io.Writer, summary *git.VerificationSummary) {
+// PrintSummary writes the human-readable verification result. The identity
+// source is called out explicitly so the "Good signature" line never presents
+// a certificate- or commit-derived name as if it were a trusted identity.
+func PrintSummary(w io.Writer, summary *git.VerificationSummary, source IdentitySource) {
 	fpr := internal.CertHexFingerprint(summary.Cert)
 
 	fmt.Fprintln(w, "tlog index:", *summary.LogEntry.LogIndex)                                           // nolint:errcheck
 	fmt.Fprintf(w, "gitsign: Signature made using certificate ID 0x%s | %v\n", fpr, summary.Cert.Issuer) // nolint:errcheck
 
 	ce := cosign.CertExtensions{Cert: summary.Cert}
-	fmt.Fprintf(w, "gitsign: Good signature from %v(%s)\n", cryptoutils.GetSubjectAlternateNames(summary.Cert), ce.GetIssuer()) // nolint:errcheck
+	switch source {
+	case IdentitySourceFlag:
+		fmt.Fprintf(w, "gitsign: Good signature from %v(%s); identity source: command-line/config flags\n", cryptoutils.GetSubjectAlternateNames(summary.Cert), ce.GetIssuer()) // nolint:errcheck
+	case IdentitySourceAllowlist:
+		fmt.Fprintf(w, "gitsign: Good signature from %v(%s); identity source: repository trusted identities allowlist\n", cryptoutils.GetSubjectAlternateNames(summary.Cert), ce.GetIssuer()) // nolint:errcheck
+	default:
+		fmt.Fprintf(w, "gitsign: Signature certificate subject %v(%s); no trusted identity policy applied\n", cryptoutils.GetSubjectAlternateNames(summary.Cert), ce.GetIssuer()) // nolint:errcheck
+	}
 
 	for _, c := range summary.Claims {
 		fmt.Fprintf(w, "%s: %t\n", string(c.Key), c.Value) // nolint:errcheck
@@ -159,6 +170,13 @@ func New(cfg *config.Config) *cobra.Command {
 verify verifies a commit against a set of certificate claims.
 This should generally be used over git verify-commit, since verify will
 check the identity included in the signature's certificate.
+
+The expected signer identity must come from a trusted source: pass
+--certificate-identity together with --certificate-oidc-issuer, or configure
+a repository allowlist via gitsign.trustedIdentities /
+gitsign.trustedIdentitiesFile. The commit's committer email is never used as
+the expected identity, because it is attacker-controlled text inside the
+commit. Identity and OIDC issuer are always checked as a pair.
 
 If no revision is specified, HEAD is used.`,
 		RunE: func(_ *cobra.Command, args []string) error {

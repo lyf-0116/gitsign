@@ -40,6 +40,17 @@ var (
 	execFn = realExec
 )
 
+// TrustedIdentity is one accepted signer identity for `gitsign verify`.
+// Identity matches the certificate SAN (email or URI), Issuer matches the
+// Fulcio OIDC issuer extension. The two are always evaluated together: an
+// identity without an issuer (or vice versa) cannot express who is trusted,
+// because anyone can obtain a certificate for any identity from an issuer the
+// repository does not trust.
+type TrustedIdentity struct {
+	Identity string
+	Issuer   string
+}
+
 // Config represents configuration options for gitsign.
 type Config struct {
 	// Address of Fulcio server
@@ -120,6 +131,20 @@ type Config struct {
 	CommitterName  string
 	CommitterEmail string
 	MatchCommitter bool
+
+	// TrustedIdentities is a list of certificate identities (subject + OIDC
+	// issuer pairs) that `gitsign verify` accepts when the caller did not pass
+	// --certificate-identity / --certificate-oidc-issuer explicitly. Each entry
+	// is an "identity issuer" pair, e.g.
+	// "alice@example.com https://oauth2.sigstore.dev/auth". The expected
+	// identity is never derived from the commit itself, whose committer field is
+	// attacker-controlled.
+	TrustedIdentities []TrustedIdentity
+	// TrustedIdentitiesFile is a path (local file, http(s) URL, or a path
+	// relative to the repository's origin remote) to the same allowlist. This is
+	// how a repository ships a single source of truth that every clone can use
+	// without spelling out identities on the command line.
+	TrustedIdentitiesFile string
 
 	// Autoclose specifies whether to close window after successful authentication
 	Autoclose bool
@@ -217,6 +242,10 @@ func Get() (*Config, error) {
 	out.CredentialCache = envOrValue("GITSIGN_CREDENTIAL_CACHE", out.CredentialCache)
 	out.RekorMode = envOrValue("GITSIGN_REKOR_MODE", out.RekorMode)
 	out.URLOpener = envOrValue("GITSIGN_URL_OPENER", out.URLOpener)
+	out.TrustedIdentitiesFile = envOrValue("GITSIGN_TRUSTED_IDENTITIES_FILE", out.TrustedIdentitiesFile)
+	if v, ok := os.LookupEnv("GITSIGN_TRUSTED_IDENTITIES"); ok {
+		out.TrustedIdentities = append(out.TrustedIdentities, parseTrustedIdentity(v)...)
+	}
 	out.EnableSigstoreGo = envOrValue("GITSIGN_ENABLE_SIGSTORE_GO", fmt.Sprintf("%t", out.EnableSigstoreGo)) == "true"
 	// RekorVersion honors both the SIGSTORE and GITSIGN prefixes; GITSIGN is
 	// checked last so it takes precedence, consistent with the other shared
@@ -346,6 +375,10 @@ func applyGitOptions(out *Config, cfg map[string]string) {
 			out.TimestampCert = v
 		case strings.EqualFold(k, "gitsign.matchCommitter"):
 			out.MatchCommitter = strings.EqualFold(v, "true")
+		case strings.EqualFold(k, "gitsign.trustedIdentities"):
+			out.TrustedIdentities = append(out.TrustedIdentities, parseTrustedIdentity(v)...)
+		case strings.EqualFold(k, "gitsign.trustedIdentitiesFile"):
+			out.TrustedIdentitiesFile = v
 		case strings.EqualFold(k, "gitsign.autoclose"):
 			out.Autoclose = strings.EqualFold(v, "true")
 		case strings.EqualFold(k, "gitsign.autocloseTimeout"):
@@ -365,4 +398,22 @@ func envOrValue(env, value string) string {
 		return v
 	}
 	return value
+}
+
+// parseTrustedIdentity parses trusted-identity entries from configuration.
+// Multiple entries are separated by commas; each entry is an
+// "<identity> <issuer>" pair (whitespace separated). Entries missing either
+// half are dropped so a typo can never silently widen the allowlist into an
+// identity-without-issuer (or issuer-without-identity) rule.
+func parseTrustedIdentity(raw string) []TrustedIdentity {
+	var out []TrustedIdentity
+	for _, entry := range strings.Split(raw, ",") {
+		fields := strings.Fields(entry)
+		if len(fields) != 2 {
+			log.Printf("invalid gitsign.trustedIdentities entry %q, want \"identity issuer\", ignoring", entry)
+			continue
+		}
+		out = append(out, TrustedIdentity{Identity: fields[0], Issuer: fields[1]})
+	}
+	return out
 }

@@ -24,10 +24,12 @@ import (
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	cosignopts "github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
 	"github.com/sigstore/gitsign/internal/commands/verify"
 	"github.com/sigstore/gitsign/internal/config"
 	"github.com/sigstore/gitsign/internal/gitsign"
 	"github.com/sigstore/gitsign/pkg/git"
+	"github.com/sigstore/sigstore/pkg/cryptoutils"
 	"github.com/spf13/cobra"
 )
 
@@ -96,6 +98,22 @@ func (o *options) Run(_ io.Writer, args []string) error {
 		return fmt.Errorf("%w: %q", git.ErrUnsupportedSignatureType, p.Type)
 	}
 
+	// Resolve the trusted identity before verifying, using the same policy as
+	// `gitsign verify` (explicit flags or the repository trusted allowlist).
+	leaf, err := verify.LeafCertificate(sig)
+	if err != nil {
+		return fmt.Errorf("error reading signer certificate: %w", err)
+	}
+	leafExt := cosign.CertExtensions{Cert: leaf}
+	source, err := verify.ResolveCertIdentity(
+		ctx, o.Config, &o.CertVerifyOptions, repo,
+		cryptoutils.GetSubjectAlternateNames(leaf),
+		leafExt.GetIssuer(),
+	)
+	if err != nil {
+		return err
+	}
+
 	// Verify the signature
 	v, err := gitsign.NewVerifierWithCosignOpts(ctx, o.Config, &o.CertVerifyOptions)
 	if err != nil {
@@ -107,7 +125,7 @@ func (o *options) Run(_ io.Writer, args []string) error {
 	}
 
 	// Import the internal package just for the PrintSummary function
-	verify.PrintSummary(os.Stdout, summary)
+	verify.PrintSummary(os.Stdout, summary, source)
 
 	return nil
 }
@@ -124,7 +142,12 @@ func New(cfg *config.Config) *cobra.Command {
 
 verify-tag verifies a tag against a set of certificate claims.
 This should generally be used over git verify-tag, since verify-tag will
-check the identity included in the signature's certificate.`,
+check the identity included in the signature's certificate.
+
+As with verify, the expected signer identity must come from a trusted source
+(--certificate-identity with --certificate-oidc-issuer, or a repository
+gitsign.trustedIdentities / gitsign.trustedIdentitiesFile allowlist); identity
+and OIDC issuer are always checked as a pair.`,
 		RunE: func(_ *cobra.Command, args []string) error {
 			// Simulate unknown flag errors.
 			if o.Cert != "" {

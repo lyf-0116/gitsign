@@ -1,5 +1,78 @@
 # Verification
 
+## Trusted Identity Verification
+
+A valid Fulcio certificate only proves that *some* OIDC principal authenticated
+with an issuer; on its own it does not say whether that principal is someone
+this repository trusts. `gitsign verify` therefore requires an explicit
+expected identity rather than deriving one from the commit.
+
+### Why the committer email is not an identity source
+
+The `committer` line in a commit object is unauthenticated text that anyone can
+set. An earlier behavior defaulted the expected `--certificate-identity` to the
+commit's committer email when no identity flag was passed. That check only
+proves "the certificate subject equals the email the commit claims", so an
+attacker who obtains their own Fulcio certificate for that email (or simply
+writes the victim's email into a commit they sign with their own identity)
+passes verification. The expected identity must instead come from outside the
+signed object.
+
+### Supplying a trusted identity
+
+Identity and OIDC issuer are always validated together as a pair; providing
+only one is an error.
+
+1. **Explicit flags**
+
+   ```sh
+   gitsign verify \
+     --certificate-identity=alice@example.com \
+     --certificate-oidc-issuer=https://oauth2.sigstore.dev/auth \
+     HEAD
+   ```
+
+   The `--certificate-identity-regexp` and `--certificate-oidc-issuer-regexp`
+   variants are accepted the same way.
+
+2. **Repository allowlist (keeps one-command verification working)**
+
+   Configure an inline list or a file location:
+
+   ```sh
+   # Inline entries: comma-separated "identity issuer" pairs.
+   git config gitsign.trustedIdentities \
+     "alice@example.com https://oauth2.sigstore.dev/auth,https://myorg/ci https://token.actions.githubusercontent.com"
+
+   # Or a file: local path, http(s) URL, or a path relative to origin.
+   git config gitsign.trustedIdentitiesFile .gitsign/trusted-identities
+   ```
+
+   A repo-relative path is resolved against the `origin` remote as
+   `<origin-url-without-.git>/raw/<path>`, so a list committed to the
+   repository is the single source of truth for every clone. Absolute
+   `http(s)://` / `file://` URLs and local paths are used unchanged. The file
+   format is one `identity issuer` pair per line; blank lines and lines
+   starting with `#` are ignored, and malformed lines are skipped rather than
+   treated as partial rules.
+
+   Environment overrides: `GITSIGN_TRUSTED_IDENTITIES` (same inline syntax) and
+   `GITSIGN_TRUSTED_IDENTITIES_FILE`.
+
+### Identity source in the output
+
+The success line states where the matched identity came from so a name read off
+the certificate is never mistaken for a trusted name:
+
+- `identity source: command-line/config flags` - explicit `--certificate-*`
+  flags were supplied.
+- `identity source: repository trusted identities allowlist` - the
+  certificate SAN and issuer matched a configured allowlist entry.
+
+`git verify-commit` (which cannot pass identity options) prints
+`no trusted identity policy applied` and keeps its existing warning; it only
+validates the cryptographic signature and Rekor inclusion.
+
 ## Offline Verification
 
 ### How we sign
